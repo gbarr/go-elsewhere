@@ -38,24 +38,31 @@ func mapRequest(req *http.Request) error {
 }
 
 func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if req.Method == "CONFIG" {
+	switch req.Method {
+	case "CONFIG":
 		h := strings.Split(req.URL.Path, "/")[1]
 		log.Printf("Config %s => %s", req.Host, h)
 		route[req.Host] = h
 		rw.WriteHeader(http.StatusOK)
-
-		return
+	case "CLEAR":
+		_, found := route[req.Host]
+		if found {
+			log.Printf("Clear %s", req.Host)
+			delete(route, req.Host)
+			rw.WriteHeader(http.StatusOK)
+		} else {
+			log.Printf("No such mapping %s", req.Host)
+			rw.WriteHeader(http.StatusNotFound)
+		}
+	default:
+		err := mapRequest(req)
+		if err != nil {
+			log.Printf("%v", err)
+			rw.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			p.ReverseProxy.ServeHTTP(rw, req)
+		}
 	}
-
-	err := mapRequest(req)
-	if err != nil {
-		log.Printf("%v", err)
-		rw.WriteHeader(http.StatusServiceUnavailable)
-
-		return
-	}
-
-	p.ReverseProxy.ServeHTTP(rw, req)
 }
 
 func main() {
