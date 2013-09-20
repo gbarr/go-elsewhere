@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,11 +11,31 @@ import (
 	"time"
 )
 
+var subdomain = flag.Bool("allow-subdomains", false, "Allow sub-domains")
+var listen = flag.String("listen", ":80", "host:port to listen on")
+
 type MyProxy struct {
-	forward httputil.ReverseProxy
+	httputil.ReverseProxy
 }
 
 var route = make(map[string]string)
+
+func mapRequest(req *http.Request) error {
+	to := strings.Split(req.Host, ":")[0]
+	for strings.Index(to, ".") > 0 {
+		dest, ok := route[to]
+		if ok {
+			log.Printf("Redirect %s => %s", req.Host, dest)
+			req.URL.Host = dest
+			return nil
+		}
+		if *subdomain == false {
+			break
+		}
+		to = strings.SplitAfterN(to, ".", 2)[1]
+	}
+	return fmt.Errorf("Redirect FAILED %s", req.Host)
+}
 
 func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.Method == "CONFIG" {
@@ -26,26 +47,30 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	p.forward.ServeHTTP(rw, req)
+	err := mapRequest(req)
+	if err != nil {
+		log.Printf("%v", err)
+		rw.WriteHeader(http.StatusServiceUnavailable)
+
+		return
+	}
+
+	p.ReverseProxy.ServeHTTP(rw, req)
 }
 
 func main() {
-	var listen = flag.String("listen", ":80", "host:port to listen on")
 	flag.Parse()
 
 	director := func(req *http.Request) {
 		req.URL.Scheme = "http"
-		req.URL.Host = req.Host
 	}
 
 	dial := func(n, addr string) (net.Conn, error) {
-		to := strings.Split(addr, ":")[0]
-		log.Printf("Redirect %s => %s", addr, route[to])
-		return net.DialTimeout(n, route[to], 200*time.Millisecond)
+		return net.DialTimeout(n, addr, 200*time.Millisecond)
 	}
 
 	proxy := &MyProxy{
-		forward: httputil.ReverseProxy{
+		httputil.ReverseProxy{
 			Director:  director,
 			Transport: &http.Transport{Dial: dial},
 		},
