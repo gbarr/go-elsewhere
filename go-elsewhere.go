@@ -27,6 +27,14 @@ type MyTransport struct {
 var route = make(map[string]string)
 
 func mapRequest(req *http.Request) error {
+
+	for _, value := range req.Header["X-Elsewhere"] {
+		if value == *listen {
+			return fmt.Errorf("Loop detected %s => %v", req.Host, req.Header["X-Elsewhere"])
+		}
+	}
+	req.Header.Add("X-Elsewhere", *listen)
+
 	to := strings.Split(req.Host, ":")[0]
 	for strings.Index(to, ".") > 0 {
 		dest, ok := route[to]
