@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +18,10 @@ var listen = flag.String("listen", ":80", "host:port to listen on")
 
 type MyProxy struct {
 	httputil.ReverseProxy
+}
+
+type MyTransport struct {
+	http.Transport
 }
 
 var route = make(map[string]string)
@@ -45,8 +51,7 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		route[req.Host] = h
 		rw.WriteHeader(http.StatusOK)
 	case "CLEAR":
-		_, found := route[req.Host]
-		if found {
+		if _, found := route[req.Host]; found {
 			log.Printf("Clear %s", req.Host)
 			delete(route, req.Host)
 			rw.WriteHeader(http.StatusOK)
@@ -55,14 +60,30 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusNotFound)
 		}
 	default:
-		err := mapRequest(req)
-		if err != nil {
+		if err := mapRequest(req); err != nil {
 			log.Printf("%v", err)
 			rw.WriteHeader(http.StatusServiceUnavailable)
 		} else {
 			p.ReverseProxy.ServeHTTP(rw, req)
 		}
 	}
+}
+
+func (t *MyTransport) RoundTrip(req *http.Request) (res *http.Response, err error) {
+	res, err = t.Transport.RoundTrip(req)
+	if err != nil {
+		log.Printf("%v", err)
+		res = &http.Response{
+			StatusCode:    503,
+			ProtoMajor:    1,
+			ProtoMinor:    0,
+			Header:        http.Header{},
+			Body:          ioutil.NopCloser(bytes.NewBufferString("")),
+			ContentLength: 0,
+		}
+		err = nil
+	}
+	return res, err
 }
 
 func main() {
@@ -78,8 +99,12 @@ func main() {
 
 	proxy := &MyProxy{
 		httputil.ReverseProxy{
-			Director:  director,
-			Transport: &http.Transport{Dial: dial},
+			Director: director,
+			Transport: &MyTransport{
+				http.Transport{
+					Dial: dial,
+				},
+			},
 		},
 	}
 
