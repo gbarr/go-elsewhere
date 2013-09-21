@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -15,6 +16,8 @@ import (
 
 var subdomain = flag.Bool("allow-subdomains", false, "Allow sub-domains")
 var listen = flag.String("listen", ":80", "host:port to listen on")
+var configAuth = flag.String("config-auth", "", "require auth to config")
+var proxyAuth = flag.String("proxy-auth", "", "require auth to proxy")
 
 type MyProxy struct {
 	httputil.ReverseProxy
@@ -51,14 +54,29 @@ func mapRequest(req *http.Request) error {
 	return fmt.Errorf("Redirect FAILED %s", req.Host)
 }
 
+func checkAuth(req *http.Request, field string, b64 *string) bool {
+	if len(*b64) == 0 {
+		return true
+	}
+	return *b64 == req.Header.Get(field)
+}
+
 func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case "CONFIG":
+		if !checkAuth(req, "Authorization", configAuth) {
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		h := strings.Split(req.URL.Path, "/")[1]
 		log.Printf("Config %s => %s", req.Host, h)
 		route[req.Host] = h
 		rw.WriteHeader(http.StatusOK)
 	case "CLEAR":
+		if !checkAuth(req, "Authorization", configAuth) {
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		if _, found := route[req.Host]; found {
 			log.Printf("Clear %s", req.Host)
 			delete(route, req.Host)
@@ -68,6 +86,10 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusNotFound)
 		}
 	default:
+		if !checkAuth(req, "Proxy-Authorization", proxyAuth) {
+			rw.WriteHeader(http.StatusProxyAuthRequired)
+			return
+		}
 		if err := mapRequest(req); err != nil {
 			log.Printf("%v", err)
 			rw.WriteHeader(http.StatusServiceUnavailable)
@@ -96,6 +118,14 @@ func (t *MyTransport) RoundTrip(req *http.Request) (res *http.Response, err erro
 
 func main() {
 	flag.Parse()
+
+	if len(*configAuth) > 0 {
+		*configAuth = "Basic " + base64.StdEncoding.EncodeToString([]byte(*configAuth))
+	}
+
+	if len(*proxyAuth) > 0 {
+		*proxyAuth = "Basic " + base64.StdEncoding.EncodeToString([]byte(*proxyAuth))
+	}
 
 	director := func(req *http.Request) {
 		req.URL.Scheme = "http"
