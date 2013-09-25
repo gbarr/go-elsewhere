@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"github.com/gbarr/gouuid"
 	"io/ioutil"
 	"log"
 	"net"
@@ -18,6 +19,7 @@ var subdomain = flag.Bool("allow-subdomains", false, "Allow sub-domains")
 var listen = flag.String("listen", ":80", "host:port to listen on")
 var configAuth = flag.String("config-auth", "", "require auth to config")
 var proxyAuth = flag.String("proxy-auth", "", "require auth to proxy")
+var uid = flag.String("uid", "", "UID to prevent loops")
 
 type MyProxy struct {
 	httputil.ReverseProxy
@@ -32,11 +34,11 @@ var route = make(map[string]string)
 func mapRequest(req *http.Request) error {
 
 	for _, value := range req.Header["X-Elsewhere"] {
-		if value == *listen {
+		if value == *uid {
 			return fmt.Errorf("Loop detected %s => %v", req.Host, req.Header["X-Elsewhere"])
 		}
 	}
-	req.Header.Add("X-Elsewhere", *listen)
+	req.Header.Add("X-Elsewhere", *uid)
 
 	to := strings.Split(req.Host, ":")[0]
 	for strings.Index(to, ".") > 0 {
@@ -125,6 +127,11 @@ func main() {
 
 	if len(*proxyAuth) > 0 {
 		*proxyAuth = "Basic " + base64.StdEncoding.EncodeToString([]byte(*proxyAuth))
+	}
+
+	if len(*uid) == 0 {
+		uuid4, _ := uuid.NewV4()
+		*uid = uuid4.String()
 	}
 
 	director := func(req *http.Request) {
