@@ -1,4 +1,5 @@
 package main
+// vim: noet:ai:sw=8
 
 import (
 	"bytes"
