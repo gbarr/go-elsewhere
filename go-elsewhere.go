@@ -1,26 +1,32 @@
-package main
 // vim: noet:ai:sw=8
+package main
 
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/gbarr/gouuid"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"time"
 )
+
+var route = make(map[string]string)
 
 var subdomain = flag.Bool("allow-subdomains", false, "Allow sub-domains")
 var listen = flag.String("listen", ":80", "host:port to listen on")
 var configAuth = flag.String("config-auth", "", "require auth to config")
 var proxyAuth = flag.String("proxy-auth", "", "require auth to proxy")
 var uid = flag.String("uid", "", "UID to prevent loops")
+var pairServer = flag.String("pair-server", "", "host:port to pair server to relay config settings")
 
 type MyProxy struct {
 	httputil.ReverseProxy
@@ -30,17 +36,34 @@ type MyTransport struct {
 	http.Transport
 }
 
-var route = make(map[string]string)
+type dummyResponse struct {
+	hdr http.Header
+}
 
-func mapRequest(req *http.Request) error {
+func (w *dummyResponse) Header() http.Header {
+	return w.hdr
+}
 
+func (w *dummyResponse) WriteHeader(code int) {
+	return
+}
+
+func (w *dummyResponse) Write(data []byte) (n int, err error) {
+	return 0, nil
+}
+
+
+func checkLoop(req *http.Request) error {
 	for _, value := range req.Header["X-Elsewhere"] {
 		if value == *uid {
 			return fmt.Errorf("Loop detected %s => %v", req.Host, req.Header["X-Elsewhere"])
 		}
 	}
 	req.Header.Add("X-Elsewhere", *uid)
+	return nil
+}
 
+func mapRequest(req *http.Request) error {
 	to := strings.Split(req.Host, ":")[0]
 	for strings.Index(to, ".") > 0 {
 		dest, ok := route[to]
@@ -64,9 +87,24 @@ func checkAuth(req *http.Request, field string, b64 *string) bool {
 	return *b64 == req.Header.Get(field)
 }
 
+func mirrorConfig(p *MyProxy, req *http.Request) {
+	if len(*pairServer) > 0 {
+		rw := &dummyResponse{hdr: http.Header{}}
+		req.URL.Host = *pairServer
+		p.ReverseProxy.ServeHTTP(rw, req)
+	}
+}
+
 func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	switch req.Method {
+	case "DUMP":
+		str, _ := json.Marshal(&route)
+		rw.Header().Set("Content-Length", strconv.Itoa(len(str)))
+		rw.Write(str)
 	case "CONFIG":
+		if checkLoop(req) != nil {
+			return
+		}
 		if !checkAuth(req, "Authorization", configAuth) {
 			rw.WriteHeader(http.StatusUnauthorized)
 			return
@@ -74,8 +112,12 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		h := strings.Split(req.URL.Path, "/")[1]
 		log.Printf("Config %s => %s", req.Host, h)
 		route[req.Host] = h
+		mirrorConfig(p, req)
 		rw.WriteHeader(http.StatusOK)
 	case "CLEAR":
+		if checkLoop(req) != nil {
+			return
+		}
 		if !checkAuth(req, "Authorization", configAuth) {
 			rw.WriteHeader(http.StatusUnauthorized)
 			return
@@ -83,6 +125,7 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		if _, found := route[req.Host]; found {
 			log.Printf("Clear %s", req.Host)
 			delete(route, req.Host)
+			mirrorConfig(p, req)
 			rw.WriteHeader(http.StatusOK)
 		} else {
 			log.Printf("No such mapping %s", req.Host)
@@ -93,7 +136,11 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusProxyAuthRequired)
 			return
 		}
-		if err := mapRequest(req); err != nil {
+		err := checkLoop(req)
+		if err == nil {
+			err = mapRequest(req)
+		}
+		if err != nil {
 			log.Printf("%v", err)
 			rw.WriteHeader(http.StatusServiceUnavailable)
 		} else {
@@ -133,6 +180,25 @@ func main() {
 	if len(*uid) == 0 {
 		uuid4, _ := uuid.NewV4()
 		*uid = uuid4.String()
+	}
+
+	if len(*pairServer) > 0 {
+		req, _ := http.NewRequest("DUMP", "http://"+*pairServer+"/", nil)
+		resp, err := http.DefaultClient.Do(req)
+
+		if err == nil {
+			rbody := resp.Body
+			if rbody != nil {
+				var bout bytes.Buffer
+				io.Copy(&bout, rbody)
+				rbody.Close()
+				if bout.Len() > 0 {
+					json.Unmarshal(bout.Bytes(), &route)
+					log.Printf("CONFIG = %s", bout.String())
+				}
+			}
+
+		}
 	}
 
 	director := func(req *http.Request) {
