@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -51,7 +52,6 @@ func (w *dummyResponse) WriteHeader(code int) {
 func (w *dummyResponse) Write(data []byte) (n int, err error) {
 	return 0, nil
 }
-
 
 func checkLoop(req *http.Request) error {
 	for _, value := range req.Header["X-Elsewhere"] {
@@ -95,33 +95,27 @@ func mirrorConfig(p *MyProxy, req *http.Request) {
 	}
 }
 
-func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+func (p *MyProxy) ServeHTTPConfig(rw http.ResponseWriter, req *http.Request) {
+	if checkLoop(req) != nil {
+		rw.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if !checkAuth(req, "Authorization", configAuth) {
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 	switch req.Method {
-	case "DUMP":
+	case "GET":
 		str, _ := json.Marshal(&route)
 		rw.Header().Set("Content-Length", strconv.Itoa(len(str)))
 		rw.Write(str)
-	case "CONFIG":
-		if checkLoop(req) != nil {
-			return
-		}
-		if !checkAuth(req, "Authorization", configAuth) {
-			rw.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	case "PUT":
 		h := strings.Split(req.URL.Path, "/")[1]
 		log.Printf("Config %s => %s", req.Host, h)
 		route[req.Host] = h
 		mirrorConfig(p, req)
 		rw.WriteHeader(http.StatusOK)
-	case "CLEAR":
-		if checkLoop(req) != nil {
-			return
-		}
-		if !checkAuth(req, "Authorization", configAuth) {
-			rw.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	case "DELETE":
 		if _, found := route[req.Host]; found {
 			log.Printf("Clear %s", req.Host)
 			delete(route, req.Host)
@@ -132,20 +126,29 @@ func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusNotFound)
 		}
 	default:
-		if !checkAuth(req, "Proxy-Authorization", proxyAuth) {
-			rw.WriteHeader(http.StatusProxyAuthRequired)
-			return
-		}
-		err := checkLoop(req)
-		if err == nil {
-			err = mapRequest(req)
-		}
-		if err != nil {
-			log.Printf("%v", err)
-			rw.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			p.ReverseProxy.ServeHTTP(rw, req)
-		}
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	log.Printf("%v", req.Header)
+	if len(req.Header.Get("X-Elsewhere-Config")) > 0 {
+		p.ServeHTTPConfig(rw, req)
+		return
+	}
+	if !checkAuth(req, "Proxy-Authorization", proxyAuth) {
+		rw.WriteHeader(http.StatusProxyAuthRequired)
+		return
+	}
+	err := checkLoop(req)
+	if err == nil {
+		err = mapRequest(req)
+	}
+	if err != nil {
+		log.Printf("%v", err)
+		rw.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		p.ReverseProxy.ServeHTTP(rw, req)
 	}
 }
 
@@ -183,10 +186,18 @@ func main() {
 	}
 
 	if len(*pairServer) > 0 {
-		req, _ := http.NewRequest("DUMP", "http://"+*pairServer+"/", nil)
+		req, _ := http.NewRequest("GET", "http://"+*pairServer+"/", nil)
+		req.Header.Set("X-Elsewhere-Config", "1")
+		if len(*configAuth) > 0 {
+			req.Header.Set("Authorization", *configAuth)
+		}
 		resp, err := http.DefaultClient.Do(req)
 
 		if err == nil {
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("Failed to get pair config [%s] %s", *pairServer, resp.Status)
+				os.Exit(1)
+			}
 			rbody := resp.Body
 			if rbody != nil {
 				var bout bytes.Buffer
