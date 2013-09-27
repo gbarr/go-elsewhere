@@ -131,7 +131,6 @@ func (p *MyProxy) ServeHTTPConfig(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (p *MyProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	log.Printf("%v", req.Header)
 	if len(req.Header.Get("X-Elsewhere-Config")) > 0 {
 		p.ServeHTTPConfig(rw, req)
 		return
